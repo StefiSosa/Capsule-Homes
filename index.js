@@ -78,7 +78,9 @@
       { cubeMapPreviewUrl: urlPrefix + "/" + data.id + "/preview.jpg" });
     var geometry = new Marzipano.CubeGeometry(data.levels);
 
-    var limiter = Marzipano.RectilinearView.limit.traditional(data.faceSize, 100*Math.PI/180, 120*Math.PI/180);
+    var limiter = Marzipano.RectilinearView.limit.traditional(
+      data.faceSize, 100*Math.PI/180, 120*Math.PI/180
+    );
     var view = new Marzipano.RectilinearView(data.initialViewParameters, limiter);
 
     var scene = viewer.createScene({
@@ -148,7 +150,7 @@
   // Set handler for scene switch.
   scenes.forEach(function(scene) {
     var el = document.querySelector('#sceneList .scene[data-id="' + scene.data.id + '"]');
-    el.addEventListener('click', function() {
+    el && el.addEventListener('click', function() {
       switchScene(scene);
       // On mobile, hide scene list after selecting a scene.
       if (document.body.classList.contains('mobile')) {
@@ -177,6 +179,132 @@
   controls.registerMethod('rightElement', new Marzipano.ElementPressControlMethod(viewRightElement,  'x',  velocity, friction), true);
   controls.registerMethod('inElement',    new Marzipano.ElementPressControlMethod(viewInElement,  'zoom', -velocity, friction), true);
   controls.registerMethod('outElement',   new Marzipano.ElementPressControlMethod(viewOutElement, 'zoom',  velocity, friction), true);
+
+  // ------------------------------------------------------------------
+  // Device Orientation control (toggle button, iOS permission, checks)
+  // Requires DeviceOrientationControlMethod.js to be loaded beforehand.
+  // ------------------------------------------------------------------
+
+  // Create/locate the toggle button. If not present, inject a minimal one.
+  var gyroToggleElement = document.querySelector('#gyroToggle');
+  if (!gyroToggleElement) {
+    var titleBar = document.querySelector('#titleBar') || document.body;
+    gyroToggleElement = document.createElement('button');
+    gyroToggleElement.id = 'gyroToggle';
+    gyroToggleElement.title = 'Device Orientation';
+    gyroToggleElement.className = 'icon-button';
+    gyroToggleElement.textContent = '🧭';
+    if (titleBar && titleBar !== document.body) {
+      titleBar.appendChild(gyroToggleElement);
+    } else {
+      // Fallback placement if there's no title bar in the template.
+      gyroToggleElement.style.position = 'fixed';
+      gyroToggleElement.style.right = '10px';
+      gyroToggleElement.style.bottom = '10px';
+      gyroToggleElement.style.zIndex = '9999';
+      document.body.appendChild(gyroToggleElement);
+    }
+  }
+
+  // Helpers
+  function isSecureContextForSensors() {
+    // Most browsers require a secure context for motion/orientation sensors.
+    return location.protocol === 'https:' || location.hostname === 'localhost';
+  }
+
+  async function requestIOSPermissionIfNeeded() {
+    // iOS 13+ requires explicit permission from a user gesture.
+    if (typeof DeviceOrientationEvent !== 'undefined' &&
+        typeof DeviceOrientationEvent.requestPermission === 'function') {
+      try {
+        var res = await DeviceOrientationEvent.requestPermission();
+        return res === 'granted';
+      } catch (e) {
+        return false;
+      }
+    }
+    return true; // Android/others
+  }
+
+  function deviceOrientationApiPresent() {
+    return ('DeviceOrientationEvent' in window) || ('ondeviceorientation' in window);
+  }
+
+  // Light-weight probe: listen once to confirm the browser actually emits data.
+  function probeDeviceOrientationOnce(timeoutMs) {
+    timeoutMs = timeoutMs || 1500;
+    return new Promise(function(resolve) {
+      var timer = setTimeout(function() {
+        window.removeEventListener('deviceorientation', handler);
+        resolve(false);
+      }, timeoutMs);
+      function handler(e) {
+        clearTimeout(timer);
+        window.removeEventListener('deviceorientation', handler);
+        resolve(!!(e && (e.alpha != null || e.beta != null || e.gamma != null)));
+      }
+      window.addEventListener('deviceorientation', handler, { once: true });
+    });
+  }
+
+  var deviceControl = null;
+  var gyroEnabled = false;
+
+  async function enableGyro() {
+    if (!isSecureContextForSensors()) {
+      alert('Device Orientation requires HTTPS or localhost.');
+      return;
+    }
+    if (!deviceOrientationApiPresent()) {
+      alert('DeviceOrientation API is not available in this browser.');
+      return;
+    }
+    var granted = await requestIOSPermissionIfNeeded();
+    if (!granted) {
+      alert('Motion/Orientation permission was not granted.');
+      return;
+    }
+    var ok = await probeDeviceOrientationOnce(1500);
+    if (!ok) {
+      alert('No orientation data received. Check browser/device permissions and try the official demo.');
+      return;
+    }
+
+    if (!deviceControl) {
+      // Same pattern as the official demo: global class provided by the helper script.
+      deviceControl = new DeviceOrientationControlMethod();
+      // Register the control method but keep it disabled by default.
+      controls.registerMethod('deviceOrientation', deviceControl, false);
+    }
+
+    // Avoid competing with autorotate while device orientation is active.
+    stopAutorotate();
+
+    // Enable the control method so the view follows device orientation.
+    controls.enableMethod('deviceOrientation');
+    gyroEnabled = true;
+    gyroToggleElement.classList.add('enabled');
+  }
+
+  function disableGyro() {
+    if (deviceControl) {
+      controls.disableMethod('deviceOrientation');
+    }
+    gyroEnabled = false;
+    gyroToggleElement.classList.remove('enabled');
+
+    // If autorotate was toggled on by the UI, resume it.
+    if (autorotateToggleElement.classList.contains('enabled')) {
+      startAutorotate();
+    }
+  }
+
+  gyroToggleElement.addEventListener('click', function () {
+    if (gyroEnabled) disableGyro();
+    else enableGyro();
+  });
+
+  // ------------------------------------------------------------------
 
   function sanitize(s) {
     return s.replace('&', '&amp;').replace('<', '&lt;').replace('>', '&gt;');
